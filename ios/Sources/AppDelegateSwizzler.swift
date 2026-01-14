@@ -63,10 +63,10 @@ final class PushForwarder: NSObject, UIApplicationDelegate {
     let hex = deviceToken.map { String(format: "%02x", $0) }.joined()
 
     // Notify plugin about token
-    AppDelegateSwizzler.plugin?.handlePushTokenReceived(hex)
+    AppDelegateSwizzler.plugin?.handlePushTokenReceived(deviceToken)
 
     // Also emit event for JS/Rust listeners
-    try? AppDelegateSwizzler.plugin?.trigger("push-token", data: ["token": hex])
+    // try? AppDelegateSwizzler.plugin?.trigger("push-token", data: ["token": hex])
 
     // Call original only if it was swapped (not added)
     if responds(to: #selector(ta_application(_:didRegisterForRemoteNotificationsWithDeviceToken:))) {

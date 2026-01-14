@@ -1,6 +1,11 @@
 import AppKit
 import UserNotifications
 
+#if ENABLE_PUSH_NOTIFICATIONS
+  import FirebaseCore
+  import FirebaseMessaging
+#endif
+
 extension FFIResult: Error {}
 
 typealias JsonObject = [String: Any]
@@ -101,6 +106,10 @@ struct RemoveActiveArgs: Decodable {
   let notifications: [RemoveActiveNotification]
 }
 
+struct TopicSubscriptionArgs: Decodable {
+  let topic: String
+}
+
 extension RustString {
   func decode<T: Decodable>(_ type: T.Type) throws(FFIResult) -> T {
     guard let data = self.toString().data(using: .utf8) else {
@@ -172,19 +181,37 @@ class NotificationPlugin {
     private var pushTokenCompletion: ((Result<String, Error>) -> Void)?
     private let pushTokenTimeout: TimeInterval = 10.0
     private var pushTokenTimer: Timer?
+    private var isFirebaseConfigured = false
+    
+    // Helper to detect if running on simulator (macOS doesn't have simulator, but keeping for consistency)
+    private var isRunningOnSimulator: Bool {
+      return false // macOS doesn't have simulator
+    }
   #endif
 
   init() {
-    #if ENABLE_PUSH_NOTIFICATIONS
-      // Store reference to this plugin for event triggering
-      AppDelegateSwizzler.plugin = self
-
-      // swizzle UIApplicationDelegate push methods
-      AppDelegateSwizzler.swizzlePushCallbacks()
-    #endif
-
     notificationHandler.plugin = self
     notificationManager.notificationHandler = notificationHandler
+    
+    #if ENABLE_PUSH_NOTIFICATIONS
+      // Configure Firebase - it will auto-swizzle AppDelegate methods
+      if FirebaseApp.app() == nil {
+        FirebaseApp.configure()
+      }
+      
+      // Enable auto-init for automatic token handling
+      Messaging.messaging().isAutoInitEnabled = true
+      
+      // Set delegate to receive FCM token updates
+      Messaging.messaging().delegate = self
+      
+      isFirebaseConfigured = true
+      
+      // Register for remote notifications to enable FCM
+      DispatchQueue.main.async {
+        NSApplication.shared.registerForRemoteNotifications()
+      }
+    #endif
   }
 
   public func show(args: RustString) async throws(FFIResult) -> Int32 {
@@ -331,9 +358,25 @@ class NotificationPlugin {
         self?.handlePushTokenTimeout()
       }
 
-      // Register for remote notifications
-      DispatchQueue.main.async {
-        NSApplication.shared.registerForRemoteNotifications()
+      // Get FCM token
+      Messaging.messaging().token { token, error in
+        self.pushTokenTimer?.invalidate()
+        self.pushTokenTimer = nil
+        
+        if let error = error {
+          if let completion = self.pushTokenCompletion {
+            self.pushTokenCompletion = nil
+            completion(.failure(error))
+          }
+          return
+        }
+        
+        if let token = token {
+          if let completion = self.pushTokenCompletion {
+            self.pushTokenCompletion = nil
+            completion(.success(token))
+          }
+        }
       }
     }
 
@@ -346,30 +389,8 @@ class NotificationPlugin {
         let error = NSError(
           domain: "NotificationPlugin",
           code: -1,
-          userInfo: [NSLocalizedDescriptionKey: "Timeout waiting for device token"]
+          userInfo: [NSLocalizedDescriptionKey: "Timeout waiting for FCM token"]
         )
-        completion(.failure(error))
-      }
-    }
-
-    // Called by AppDelegateSwizzler when token is received
-    func handlePushTokenReceived(_ token: String) {
-      pushTokenTimer?.invalidate()
-      pushTokenTimer = nil
-
-      if let completion = pushTokenCompletion {
-        pushTokenCompletion = nil
-        completion(.success(token))
-      }
-    }
-
-    // Called by AppDelegateSwizzler when registration fails
-    func handlePushTokenError(_ error: Error) {
-      pushTokenTimer?.invalidate()
-      pushTokenTimer = nil
-
-      if let completion = pushTokenCompletion {
-        pushTokenCompletion = nil
         completion(.failure(error))
       }
     }
@@ -385,6 +406,17 @@ class NotificationPlugin {
     try bridgeTrigger(RustString(event), RustString(jsonString))
   }
 }
+
+#if ENABLE_PUSH_NOTIFICATIONS
+  extension NotificationPlugin: MessagingDelegate {
+    public func messaging(_ messaging: Messaging, didReceiveRegistrationToken fcmToken: String?) {
+      // FCM token received - can be used for notifications
+      print("FCM token: \(fcmToken ?? "nil")")
+      
+      // Token is now available for retrieval via Messaging.messaging().token()
+    }
+  }
+#endif
 
 // Initialize the plugin
 func initPlugin() -> NotificationPlugin {

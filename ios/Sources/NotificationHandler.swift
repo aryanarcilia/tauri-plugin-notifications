@@ -5,6 +5,10 @@
 import Tauri
 import UserNotifications
 
+#if ENABLE_PUSH_NOTIFICATIONS
+  import FirebaseMessaging
+#endif
+
 public class NotificationHandler: NSObject, NotificationHandlerProtocol {
 
   public weak var plugin: Plugin?
@@ -41,6 +45,13 @@ public class NotificationHandler: NSObject, NotificationHandlerProtocol {
   }
 
   public func willPresent(notification: UNNotification) -> UNNotificationPresentationOptions {
+    let userInfo = notification.request.content.userInfo
+    
+    #if ENABLE_PUSH_NOTIFICATIONS
+      // Notify FCM about message receipt for analytics
+      Messaging.messaging().appDidReceiveMessage(userInfo)
+    #endif
+    
     // Trigger notification event for both local and push notifications
     if let notificationData = toActiveNotification(notification.request) {
       try? self.plugin?.trigger("notification", data: notificationData)
@@ -49,11 +60,11 @@ public class NotificationHandler: NSObject, NotificationHandlerProtocol {
       try? self.plugin?.trigger("notification", data: notificationData)
     }
 
-    // For push notifications in foreground, don't show system notification
-    // (only trigger event so developer can handle it)
+    // For push notifications in foreground, show alert and sound
     let isPushNotification = notification.request.trigger?.isKind(of: UNPushNotificationTrigger.self) == true
     if isPushNotification {
-      return UNNotificationPresentationOptions.init(rawValue: 0)
+      // For FCM messages, show notification with alert and sound
+      return [.alert, .sound, .badge]
     }
 
     // For local notifications, check if silent
@@ -97,7 +108,13 @@ public class NotificationHandler: NSObject, NotificationHandlerProtocol {
 
   public func didReceive(response: UNNotificationResponse) {
     let originalNotificationRequest = response.notification.request
+    let userInfo = originalNotificationRequest.content.userInfo
     let actionId = response.actionIdentifier
+
+    #if ENABLE_PUSH_NOTIFICATIONS
+      // Notify FCM about message interaction for analytics
+      Messaging.messaging().appDidReceiveMessage(userInfo)
+    #endif
 
     var actionIdValue: String
     // We turn the two default actions (open/dismiss) into generic strings
@@ -128,7 +145,6 @@ public class NotificationHandler: NSObject, NotificationHandlerProtocol {
 
     // Handle notificationClicked for both local and push notifications
     let id = Int(originalNotificationRequest.identifier) ?? -1
-    let userInfo = originalNotificationRequest.content.userInfo
     var dataDict: [String: String]? = nil
     if !userInfo.isEmpty {
       dataDict = [:]

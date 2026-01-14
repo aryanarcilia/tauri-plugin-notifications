@@ -20,7 +20,7 @@ if enablePushNotifications {
 let package = Package(
   name: "tauri-plugin-notifications",
   platforms: [
-    .macOS(.v10_13),
+    .macOS(.v10_15),
     .iOS(.v13),
   ],
   products: [
@@ -31,7 +31,8 @@ let package = Package(
       targets: ["tauri-plugin-notifications"])
   ],
   dependencies: [
-    .package(name: "Tauri", path: "../.tauri/tauri-api")
+    .package(name: "Tauri", path: "../.tauri/tauri-api"),
+    .package(url: "https://github.com/firebase/firebase-ios-sdk", from: "12.7.0")
   ],
   targets: [
     // Targets are the basic building blocks of a package. A target can define a module or a test suite.
@@ -39,10 +40,15 @@ let package = Package(
     .target(
       name: "tauri-plugin-notifications",
       dependencies: [
-        .byName(name: "Tauri")
+        .byName(name: "Tauri"),
+        .product(name: "FirebaseMessaging", package: "firebase-ios-sdk"),
+        .product(name: "FirebaseCore", package: "firebase-ios-sdk")
       ],
       path: "Sources",
-      swiftSettings: swiftSettings),
+      swiftSettings: swiftSettings,
+      linkerSettings: [
+        .linkedFramework("UserNotifications")
+      ]),
     .testTarget(
         name: "PluginTests",
         dependencies: ["tauri-plugin-notifications", .byName(name: "Tauri")]

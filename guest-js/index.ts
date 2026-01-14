@@ -179,27 +179,27 @@ class Schedule {
   /** Schedule a notification at a specific date and time. */
   at:
     | {
-        date: Date;
-        repeating: boolean;
-        allowWhileIdle: boolean;
-      }
+      date: Date;
+      repeating: boolean;
+      allowWhileIdle: boolean;
+    }
     | undefined;
 
   /** Schedule a notification using an interval configuration. */
   interval:
     | {
-        interval: ScheduleInterval;
-        allowWhileIdle: boolean;
-      }
+      interval: ScheduleInterval;
+      allowWhileIdle: boolean;
+    }
     | undefined;
 
   /** Schedule a notification to repeat at regular intervals. */
   every:
     | {
-        interval: ScheduleEvery;
-        count: number;
-        allowWhileIdle: boolean;
-      }
+      interval: ScheduleEvery;
+      count: number;
+      allowWhileIdle: boolean;
+    }
     | undefined;
 
   /**
@@ -491,8 +491,8 @@ async function sendNotification(options: Options | string): Promise<void> {
     options:
       typeof options === "string"
         ? {
-            title: options,
-          }
+          title: options,
+        }
         : options,
   });
 }

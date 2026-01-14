@@ -8,6 +8,11 @@ import UIKit
 import UserNotifications
 import WebKit
 
+#if ENABLE_PUSH_NOTIFICATIONS
+  import FirebaseCore
+  import FirebaseMessaging
+#endif
+
 enum ShowNotificationError: LocalizedError {
   case make(Error)
   case create(Error)
@@ -164,8 +169,20 @@ class NotificationPlugin: Plugin {
   #if ENABLE_PUSH_NOTIFICATIONS
     // Completion handler for push token registration
     private var pushTokenCompletion: ((Result<String, Error>) -> Void)?
-    private let pushTokenTimeout: TimeInterval = 10.0
+    private let pushTokenTimeout: TimeInterval = 30.0
     private var pushTokenTimer: Timer?
+    private var isFirebaseConfigured = false
+    
+    private var pendingPushRegistrationInvoke: Invoke?
+    
+    // Helper to detect if running on simulator
+    private var isRunningOnSimulator: Bool {
+      #if targetEnvironment(simulator)
+        return true
+      #else
+        return false
+      #endif
+    }
   #endif
 
   override init() {
@@ -176,13 +193,32 @@ class NotificationPlugin: Plugin {
 
   public override func load(webview: WKWebView) {
     super.load(webview: webview)
-
     #if ENABLE_PUSH_NOTIFICATIONS
       // Store reference to this plugin for event triggering
+      print("Setup Swizzler plugin reference")
       AppDelegateSwizzler.plugin = self
 
       // swizzle UIApplicationDelegate push methods
       AppDelegateSwizzler.swizzlePushCallbacks()
+      // Configure Firebase if not already configured
+        if FirebaseApp.app() == nil {
+          FirebaseApp.configure()
+        }
+        
+        // Verify Firebase is configured before accessing Messaging
+        guard FirebaseApp.app() != nil else {
+          print("❌ Firebase failed to configure")
+          return
+        }
+        
+        // Enable auto-init for automatic token handling
+        Messaging.messaging().isAutoInitEnabled = true
+        
+        // Set delegate to receive FCM token updates
+        Messaging.messaging().delegate = self
+        
+        isFirebaseConfigured = true
+        print("✅ Firebase configured successfully")
     #endif
   }
 
@@ -219,7 +255,7 @@ class NotificationPlugin: Plugin {
     }
   }
 
-  @objc public func registerForPushNotifications(_ invoke: Invoke) {
+   @objc public func registerForPushNotifications(_ invoke: Invoke) {
     #if ENABLE_PUSH_NOTIFICATIONS
       // First request notification permissions
       notificationHandler.requestPermissions { [weak self] granted, error in
@@ -227,12 +263,15 @@ class NotificationPlugin: Plugin {
           invoke.reject(error!.localizedDescription)
           return
         }
-
+        print("✅ registerForPushNotifications")
         self?.registerForPushNotifications { result in
           switch result {
           case .success(let token):
+            print("✅ registerForPushNotifications success")
             invoke.resolve(["deviceToken": token])
+            // self?.trigger("push-token", data: ["token": token])
           case .failure(let error):
+            print("✅ registerForPushNotifications err")
             invoke.reject(error.localizedDescription)
           }
         }
@@ -241,6 +280,7 @@ class NotificationPlugin: Plugin {
       invoke.reject("Push notifications are disabled in this build")
     #endif
   }
+
 
   @objc public func unregisterForPushNotifications(_ invoke: Invoke) {
     #if ENABLE_PUSH_NOTIFICATIONS
@@ -256,23 +296,40 @@ class NotificationPlugin: Plugin {
   #if ENABLE_PUSH_NOTIFICATIONS
     private func registerForPushNotifications(completion: @escaping (Result<String, Error>) -> Void)
     {
-      // Store completion for later
-      self.pushTokenCompletion = completion
-
-      // Set up timeout
-      self.pushTokenTimer?.invalidate()
-      self.pushTokenTimer = Timer.scheduledTimer(withTimeInterval: pushTokenTimeout, repeats: false)
-      { [weak self] _ in
-        self?.handlePushTokenTimeout()
-      }
-
-      // Register for remote notifications
-      DispatchQueue.main.async {
-        UIApplication.shared.registerForRemoteNotifications()
+      // Check if we already have a cached FCM token (from auto-init)
+      Messaging.messaging().token { [weak self] token, error in
+        if let existingToken = token, error == nil {
+          // Token already exists, return it immediately
+          print("✅ FCM token already cached: \(existingToken)")
+          completion(.success(existingToken))
+          return
+        }
+        
+        // No cached token, proceed with registration
+        print("✅ No cached token, proceeding with registration")
+        
+        // Store completion for later
+        self?.pushTokenCompletion = completion
+        
+        // Set up timeout on main thread
+        DispatchQueue.main.async { [weak self] in
+          guard let self = self else { return }
+          self.pushTokenTimer?.invalidate()
+          self.pushTokenTimer = Timer.scheduledTimer(withTimeInterval: self.pushTokenTimeout, repeats: false)
+          { [weak self] _ in
+            print("⏱️ Token timeout triggered")
+            self?.handlePushTokenTimeout()
+          }
+          
+          // Register for remote notifications
+          print("✅ Calling registerForRemoteNotifications")
+          UIApplication.shared.registerForRemoteNotifications()
+        }
       }
     }
 
     private func handlePushTokenTimeout() {
+      print("⚠️ handlePushTokenTimeout called")
       pushTokenTimer?.invalidate()
       pushTokenTimer = nil
 
@@ -283,32 +340,57 @@ class NotificationPlugin: Plugin {
           code: -1,
           userInfo: [NSLocalizedDescriptionKey: "Timeout waiting for device token"]
         )
+        print("❌ Timeout error: \(error.localizedDescription)")
         completion(.failure(error))
+      } else {
+        print("⚠️ No completion handler to call")
       }
     }
 
-    // Called by AppDelegateSwizzler when token is received
-    func handlePushTokenReceived(_ token: String) {
+    func handlePushTokenReceived(_ deviceToken: Data) {
+      let token = deviceToken.map { String(format: "%02x", $0) }.joined()
+      print("✅ handlePushTokenReceived (APNs) called with token: \(token)")
+      
+      // Only set APNs token on physical device, not simulator
+      #if !targetEnvironment(simulator)
+        Messaging.messaging().apnsToken = deviceToken
+        print("✅ APNs token set to Firebase Messaging")
+      #else
+        print("⚠️ Skipping APNs token assignment on simulator")
+        // On simulator, we won't get FCM token, so return the APNs token hex
+        handleFCMPushTokenReceived(token)
+      #endif
+    }
+
+    func handleFCMPushTokenReceived(_ token: String) {
+      print("✅ handleFCMPushTokenReceived called with token: \(token)")
       pushTokenTimer?.invalidate()
       pushTokenTimer = nil
 
       if let completion = pushTokenCompletion {
         pushTokenCompletion = nil
+        print("✅ Calling completion with token")
         completion(.success(token))
+      } else {
+        print("⚠️ No completion handler to call")
       }
     }
 
-    // Called by AppDelegateSwizzler when registration fails
     func handlePushTokenError(_ error: Error) {
+      print("❌ handlePushTokenError called: \(error.localizedDescription)")
       pushTokenTimer?.invalidate()
       pushTokenTimer = nil
 
       if let completion = pushTokenCompletion {
         pushTokenCompletion = nil
+        print("❌ Calling completion with error")
         completion(.failure(error))
+      } else {
+        print("⚠️ No completion handler to call")
       }
     }
   #endif
+
 
   @objc public override func checkPermissions(_ invoke: Invoke) {
     notificationHandler.checkPermissions { status in
@@ -396,6 +478,21 @@ class NotificationPlugin: Plugin {
     }
   }
 }
+
+#if ENABLE_PUSH_NOTIFICATIONS
+extension NotificationPlugin: MessagingDelegate {
+  // Called when FCM token is received or refreshed
+  func messaging(_ messaging: Messaging, didReceiveRegistrationToken fcmToken: String?) {
+    guard let token = fcmToken else {
+      print("⚠️ Received nil FCM token")
+      return
+    }
+    
+    print("✅ FCM Token received: \(token)")
+    handleFCMPushTokenReceived(token)
+  }
+}
+#endif
 
 @_cdecl("init_plugin_notification")
 func initPlugin() -> Plugin {
