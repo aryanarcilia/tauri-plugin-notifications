@@ -175,6 +175,9 @@ class NotificationPlugin: Plugin {
     
     private var pendingPushRegistrationInvoke: Invoke?
     
+    // Cache for FCM token received early (before registration)
+    private var cachedFCMToken: String?
+    
     // Helper to detect if running on simulator
     private var isRunningOnSimulator: Bool {
       #if targetEnvironment(simulator)
@@ -257,6 +260,13 @@ class NotificationPlugin: Plugin {
 
    @objc public func registerForPushNotifications(_ invoke: Invoke) {
     #if ENABLE_PUSH_NOTIFICATIONS
+      // Check if we already have a cached token
+      if let cachedToken = cachedFCMToken {
+        print("✅ Returning cached FCM token immediately: \(cachedToken)")
+        invoke.resolve(["deviceToken": cachedToken])
+        return
+      }
+      
       // First request notification permissions
       notificationHandler.requestPermissions { [weak self] granted, error in
         guard error == nil else {
@@ -364,6 +374,11 @@ class NotificationPlugin: Plugin {
 
     func handleFCMPushTokenReceived(_ token: String) {
       print("✅ handleFCMPushTokenReceived called with token: \(token)")
+      
+      // Cache the token for later use
+      cachedFCMToken = token
+      print("✅ FCM token cached")
+      
       pushTokenTimer?.invalidate()
       pushTokenTimer = nil
 
@@ -372,7 +387,7 @@ class NotificationPlugin: Plugin {
         print("✅ Calling completion with token")
         completion(.success(token))
       } else {
-        print("⚠️ No completion handler to call")
+        print("⚠️ No completion handler to call (token cached for later)")
       }
     }
 
