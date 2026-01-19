@@ -42,12 +42,12 @@ let package = Package(
       dependencies: [
         .byName(name: "Tauri"),
         .product(name: "FirebaseMessaging", package: "firebase-ios-sdk"),
-        .product(name: "FirebaseCore", package: "firebase-ios-sdk")
       ],
       path: "Sources",
       swiftSettings: swiftSettings,
       linkerSettings: [
-        .linkedFramework("UserNotifications")
+        .linkedFramework("UserNotifications"),
+        .unsafeFlags(["-ObjC"])  // Required for Firebase Objective-C categories
       ]),
     .testTarget(
         name: "PluginTests",

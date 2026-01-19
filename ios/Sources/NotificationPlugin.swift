@@ -162,6 +162,15 @@ struct SetClickListenerActiveArgs: Decodable {
   let active: Bool
 }
 
+#if ENABLE_PUSH_NOTIFICATIONS
+enum FirebaseState {
+  case notConfigured
+  case configuring
+  case configured
+  case ready
+}
+#endif
+
 class NotificationPlugin: Plugin {
   let notificationHandler = NotificationHandler()
   let notificationManager = NotificationManager()
@@ -171,7 +180,7 @@ class NotificationPlugin: Plugin {
     private var pushTokenCompletion: ((Result<String, Error>) -> Void)?
     private let pushTokenTimeout: TimeInterval = 30.0
     private var pushTokenTimer: Timer?
-    private var isFirebaseConfigured = false
+    private var firebaseState: FirebaseState = .notConfigured
     
     private var pendingPushRegistrationInvoke: Invoke?
     
@@ -203,25 +212,9 @@ class NotificationPlugin: Plugin {
 
       // swizzle UIApplicationDelegate push methods
       AppDelegateSwizzler.swizzlePushCallbacks()
-      // Configure Firebase if not already configured
-        if FirebaseApp.app() == nil {
-          FirebaseApp.configure()
-        }
-        
-        // Verify Firebase is configured before accessing Messaging
-        guard FirebaseApp.app() != nil else {
-          print("❌ Firebase failed to configure")
-          return
-        }
-        
-        // Enable auto-init for automatic token handling
-        Messaging.messaging().isAutoInitEnabled = true
-        
-        // Set delegate to receive FCM token updates
-        Messaging.messaging().delegate = self
-        
-        isFirebaseConfigured = true
-        print("✅ Firebase configured successfully")
+      // Firebase will be configured lazily when registerForPushNotifications() is called
+      // This prevents auto-init from generating tokens before we're ready
+      print("✅ NotificationPlugin loaded, Firebase will initialize on demand")
     #endif
   }
 
@@ -261,12 +254,6 @@ class NotificationPlugin: Plugin {
    @objc public func registerForPushNotifications(_ invoke: Invoke) {
     #if ENABLE_PUSH_NOTIFICATIONS
       // Check if we already have a cached token
-      if let cachedToken = cachedFCMToken {
-        print("✅ Returning cached FCM token immediately: \(cachedToken)")
-        invoke.resolve(["deviceToken": cachedToken])
-        return
-      }
-      
       // First request notification permissions
       notificationHandler.requestPermissions { [weak self] granted, error in
         guard error == nil else {
@@ -304,22 +291,92 @@ class NotificationPlugin: Plugin {
   }
 
   #if ENABLE_PUSH_NOTIFICATIONS
+    private func ensureFirebaseReady(completion: @escaping (Bool) -> Void) {
+      // Check current state
+      switch firebaseState {
+      case .ready:
+        completion(true)
+        return
+      case .configuring:
+        // Already configuring, wait and retry
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+          self?.ensureFirebaseReady(completion: completion)
+        }
+        return
+      case .configured:
+        // Already configured, just verify Messaging is accessible
+        firebaseState = .ready
+        completion(true)
+        return
+      case .notConfigured:
+        // Need to configure
+        firebaseState = .configuring
+        
+        DispatchQueue.main.async { [weak self] in
+          guard let self = self else {
+            completion(false)
+            return
+          }
+          
+          // Configure Firebase if needed
+          if FirebaseApp.app() == nil {
+            print("🔧 Configuring Firebase...")
+            FirebaseApp.configure()
+          }
+          
+          // Verify Firebase is configured
+          guard FirebaseApp.app() != nil else {
+            print("❌ Firebase configuration failed")
+            self.firebaseState = .notConfigured
+            completion(false)
+            return
+          }
+          
+          // Set delegate to receive FCM token updates
+          Messaging.messaging().delegate = self
+          
+          // Give Firebase time to fully initialize
+          DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self = self else {
+              completion(false)
+              return
+            }
+            
+            self.firebaseState = .ready
+            print("✅ Firebase ready")
+            completion(true)
+          }
+        }
+      }
+    }
+    
     private func registerForPushNotifications(completion: @escaping (Result<String, Error>) -> Void)
     {
-      // Check if we already have a cached FCM token (from auto-init)
-      Messaging.messaging().token { [weak self] token, error in
-        if let existingToken = token, error == nil {
-          // Token already exists, return it immediately
-          print("✅ FCM token already cached: \(existingToken)")
-          completion(.success(existingToken))
+      // Ensure Firebase is configured and ready before proceeding
+      ensureFirebaseReady { [weak self] isReady in
+        guard let self = self else {
+          completion(.failure(NSError(
+            domain: "NotificationPlugin",
+            code: -1,
+            userInfo: [NSLocalizedDescriptionKey: "Plugin deallocated"]
+          )))
           return
         }
         
-        // No cached token, proceed with registration
-        print("✅ No cached token, proceeding with registration")
+        guard isReady else {
+          let error = NSError(
+            domain: "NotificationPlugin",
+            code: -1,
+            userInfo: [NSLocalizedDescriptionKey: "Firebase failed to initialize"]
+          )
+          completion(.failure(error))
+          return
+        }
         
-        // Store completion for later
-        self?.pushTokenCompletion = completion
+        print("✅ Firebase ready, proceeding with push registration")
+        
+        // Store completion for later (will be called when FCM token is received)
+        self.pushTokenCompletion = completion
         
         // Set up timeout on main thread
         DispatchQueue.main.async { [weak self] in
@@ -331,7 +388,7 @@ class NotificationPlugin: Plugin {
             self?.handlePushTokenTimeout()
           }
           
-          // Register for remote notifications
+          // Register for remote notifications (will trigger APNs token callback)
           print("✅ Calling registerForRemoteNotifications")
           UIApplication.shared.registerForRemoteNotifications()
         }
@@ -360,16 +417,65 @@ class NotificationPlugin: Plugin {
     func handlePushTokenReceived(_ deviceToken: Data) {
       let token = deviceToken.map { String(format: "%02x", $0) }.joined()
       print("✅ handlePushTokenReceived (APNs) called with token: \(token)")
+      print("✅ handlePushTokenReceived (APNs) called with deviceToken: \(deviceToken)")
       
       // Only set APNs token on physical device, not simulator
       #if !targetEnvironment(simulator)
-        Messaging.messaging().apnsToken = deviceToken
-        print("✅ APNs token set to Firebase Messaging")
+        setAPNsToken(deviceToken, retryCount: 0)
       #else
         print("⚠️ Skipping APNs token assignment on simulator")
         // On simulator, we won't get FCM token, so return the APNs token hex
         handleFCMPushTokenReceived(token)
       #endif
+    }
+    
+    private func setAPNsToken(_ deviceToken: Data, retryCount: Int) {
+      // First ensure Firebase is ready
+      ensureFirebaseReady { [weak self] isReady in
+        guard let self = self else { return }
+        
+        guard isReady else {
+          print("❌ Firebase not ready, cannot set APNs token")
+          if retryCount < 3 {
+            print("⚠️ Retrying Firebase initialization in 1s...")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+              self?.setAPNsToken(deviceToken, retryCount: retryCount + 1)
+            }
+          }
+          return
+        }
+        
+        // Verify Firebase app still exists
+        guard FirebaseApp.app() != nil else {
+          print("❌ Firebase app not configured")
+          return
+        }
+        
+        // Set APNs token with defensive checks
+        DispatchQueue.main.async { [weak self] in
+          guard let self = self else { return }
+          
+          // Defensive: verify Messaging instance is accessible
+          let messaging = Messaging.messaging()
+          
+          // Try to set APNs token
+          messaging.apnsToken = deviceToken
+          print("✅ APNs token set to Firebase Messaging")
+          
+          // Request FCM token explicitly after APNs token is set
+          messaging.token { token, error in
+            if let error = error {
+              print("❌ Error getting FCM token: \(error.localizedDescription)")
+              self.handlePushTokenError(error)
+            } else if let token = token {
+              print("✅ FCM token retrieved after APNs token set: \(token)")
+              self.handleFCMPushTokenReceived(token)
+            } else {
+              print("⚠️ No FCM token available yet")
+            }
+          }
+        }
+      }
     }
 
     func handleFCMPushTokenReceived(_ token: String) {
@@ -500,6 +606,12 @@ extension NotificationPlugin: MessagingDelegate {
   func messaging(_ messaging: Messaging, didReceiveRegistrationToken fcmToken: String?) {
     guard let token = fcmToken else {
       print("⚠️ Received nil FCM token")
+      return
+    }
+    
+    // Only process token if Firebase is in the correct state
+    guard firebaseState == .ready else {
+      print("⚠️ FCM token received but Firebase not ready (state: \(firebaseState)), ignoring")
       return
     }
     
