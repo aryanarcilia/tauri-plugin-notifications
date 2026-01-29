@@ -69,6 +69,8 @@ This enables:
 - FCM uses APNS as the transport layer but provides unified API
 - Requires `GoogleService-Info.plist` configuration (see Platform Setup)
 - FCM tokens replace APNS device tokens
+- **Automatic AppDelegate integration** - No manual AppDelegate code required (plugin uses method swizzling)
+- **Automatic linker flag** - `-ObjC` flag automatically configured in Package.swift
 
 **Note:** Push notifications require proper Firebase setup on mobile platforms. See Platform Setup section for detailed configuration instructions.
 
@@ -594,6 +596,9 @@ Listens for notification action performed events.
 - Action support with input options
 - Silent notifications available
 - Group notifications (thread identifiers)
+- **Automatic AppDelegate integration** - No manual code required for push notifications
+- **Automatic linker flag configuration** - `-ObjC` flag added automatically via Package.swift
+- Firebase Cloud Messaging (FCM) integration with automatic APNS token forwarding
 
 ### Android
 
@@ -641,28 +646,39 @@ Or add it through Xcode:
 2. Drag `GoogleService-Info.plist` into the project navigator
 3. Ensure "Copy items if needed" and your app target are selected
 
-**Note:** Firebase automatically handles APNS token registration via method swizzling. No additional AppDelegate configuration is required.
+##### 3. Automatic AppDelegate Integration
 
-##### 3. Add Required Linker Flag
+**No manual AppDelegate code required!** The plugin automatically swizzles AppDelegate methods to handle push notification callbacks:
 
-**IMPORTANT:** Add `-ObjC` linker flag to your Xcode project:
+- `didRegisterForRemoteNotificationsWithDeviceToken` - Automatically forwards APNS tokens to Firebase
+- `didFailToRegisterForRemoteNotificationsWithError` - Handles registration errors
+- `didReceiveRemoteNotification` - Processes incoming push notifications
 
-1. Open your project in Xcode (`gen/apple/YourApp.xcodeproj`)
-2. Select your app target
-3. Go to **Build Settings** → Search for "Other Linker Flags"
-4. Add `-ObjC` to **Other Linker Flags**
+The plugin uses runtime method swizzling to intercept these callbacks, so you don't need to add any code to your AppDelegate. If your AppDelegate already implements these methods, the plugin will call your original implementations after processing.
 
-This flag is required for Firebase to load Objective-C categories. Without it, you'll see crashes like:
+##### 4. Automatic Linker Flag Configuration
+
+The `-ObjC` linker flag required for Firebase is **automatically added** by the plugin's `Package.swift` configuration. This flag is necessary for Firebase to load Objective-C categories.
+
+**Note:** In most cases, no manual configuration is needed. However, if you encounter crashes like:
 
 ```
 +[NSError messagingErrorWithCode:failureReason:]: unrecognized selector sent to class
 ```
 
-##### 4. Configure APNS with Firebase
+You may need to manually verify the linker flag in Xcode:
 
-- Enable "Apple Push Notifications service (APNs)"
-- Download the `.p8` file (keep it safe!)
-- Note the Key ID
+1. Open your project in Xcode (`gen/apple/YourApp.xcodeproj`)
+2. Select your app target
+3. Go to **Build Settings** → Search for "Other Linker Flags"
+4. Ensure `-ObjC` is present (it should be inherited from the plugin's Package.swift)
+
+##### 5. Configure APNS with Firebase
+
+1. **In Apple Developer Portal**:
+   - Enable "Apple Push Notifications service (APNs)"
+   - Download the `.p8` file (keep it safe!)
+   - Note the Key ID
 
 2. **Upload to Firebase Console**:
    - In Firebase Console, go to Project Settings → Cloud Messaging
@@ -670,7 +686,7 @@ This flag is required for Firebase to load Objective-C categories. Without it, y
    - Upload your `.p8` file
    - Enter your Key ID and Team ID (from Apple Developer)
 
-##### 5. Enable Push Notifications Feature
+##### 6. Enable Push Notifications Feature
 
 Ensure you have the `push-notifications` feature enabled in your `Cargo.toml`:
 
@@ -679,7 +695,7 @@ Ensure you have the `push-notifications` feature enabled in your `Cargo.toml`:
 tauri-plugin-notifications = { version = "0.3", features = ["push-notifications"] }
 ```
 
-##### 6. Request Push Notification Permissions
+##### 7. Request Push Notification Permissions
 
 ```typescript
 import {
@@ -709,7 +725,7 @@ const unlisten = await onNotificationReceived((notification) => {
 });
 ```
 
-##### 7. Sending Test Notifications
+##### 8. Sending Test Notifications
 
 You can send test notifications from Firebase Console:
 
@@ -734,6 +750,8 @@ If you previously used direct APNS integration:
 - The `registerForPushNotifications()` API remains the same but now returns FCM tokens
 - Update your backend to send notifications via Firebase API instead of APNS directly
 - Events (`push-token`, `push-message`, `notificationClicked`) remain compatible
+- **No AppDelegate changes needed** - Remove any manual AppDelegate push notification code as the plugin now handles it automatically via swizzling
+- **Linker flag** - If you manually added `-ObjC` flag, it's now handled automatically (but won't cause issues if left in place)
 
 ##### Troubleshooting
 
@@ -747,6 +765,8 @@ If you previously used direct APNS integration:
 - Verify APNS auth key is uploaded to Firebase Console
 - Check that bundle ID matches between Firebase Console and app
 - Ensure push notification capability is enabled in Xcode
+- Verify that `GoogleService-Info.plist` is properly added to your project
+- Check that the plugin's AppDelegate swizzling is working (check console logs during registration)
 
 **Notifications not arriving:**
 
@@ -800,6 +820,8 @@ If you previously used direct APNS integration:
 - Request permissions before sending notifications
 - Test scheduled notifications with different intervals
 - Verify action handling and notification grouping
+- **Push notifications**: Test FCM token registration and verify AppDelegate swizzling works automatically
+- Verify that push notifications arrive correctly without manual AppDelegate configuration
 
 ### Android
 
