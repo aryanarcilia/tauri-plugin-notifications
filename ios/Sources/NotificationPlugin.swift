@@ -281,9 +281,30 @@ class NotificationPlugin: Plugin {
 
   @objc public func unregisterForPushNotifications(_ invoke: Invoke) {
     #if ENABLE_PUSH_NOTIFICATIONS
-      DispatchQueue.main.async {
-        UIApplication.shared.unregisterForRemoteNotifications()
-        invoke.resolve()
+      // Clear any pending registration (timer and completion)
+      pushTokenTimer?.invalidate()
+      pushTokenTimer = nil
+      if let completion = pushTokenCompletion {
+        pushTokenCompletion = nil
+        let error = NSError(
+          domain: "NotificationPlugin",
+          code: -1,
+          userInfo: [NSLocalizedDescriptionKey: "Registration cancelled by unregister"]
+        )
+        completion(.failure(error))
+      }
+
+      // Delete FCM token via Firebase completion API (same pattern as rest of plugin)
+      Messaging.messaging().deleteToken { [weak self] error in
+        DispatchQueue.main.async {
+          if let error = error {
+            invoke.reject("Failed to delete FCM token: \(error.localizedDescription)")
+            return
+          }
+          self?.cachedFCMToken = nil
+          UIApplication.shared.unregisterForRemoteNotifications()
+          invoke.resolve()
+        }
       }
     #else
       invoke.reject("Push notifications are disabled in this build")
